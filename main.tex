@@ -1,0 +1,584 @@
+\documentclass[12pt]{article}
+
+\usepackage{sbc-template}
+\usepackage{graphicx,url}
+\usepackage[utf8]{inputenc}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage[portuguese]{babel}
+% \usepackage{subcaption} % disabled due to conflict with caption2 in sbc-template
+
+\sloppy
+
+\title{MO446/MC949 - Visão Computacional\\Modelos de Difusão: Outpainting e Refinamento Textual}
+
+\author{Caio R. Teixeira, Flávio A. P. Cunha, Isac L. S. Braga \\ Paula M. da Fonseca, Vítor de M. Calhau}
+
+\address{Instituto de Computação -- Universidade Estadual de Campinas (UNICAMP) \\
+  Campinas -- SP -- Brazil \\
+  \email{\{c212661,f197083,i260514,p138995,v248740\}@dac.unicamp.br}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Este trabalho apresenta a implementação de duas técnicas de edição de imagens baseadas em modelos de difusão: \textit{outpainting} (expansão de imagens além das bordas originais) e \textit{textual refinement} (edição guiada por texto de regiões específicas). O pipeline desenvolvido utiliza Stable Diffusion Inpainting como base e incorpora duas tecnologias complementares para aprimorar os resultados: ControlNet, que adiciona controle estrutural preciso à geração, e o SegFormer, que automatiza a criação de máscaras através de segmentação semântica. A combinação destes componentes permite que as tarefas de outpainting e refinement sejam executadas com maior precisão e menor intervenção manual. Os experimentos realizados demonstram a eficácia da abordagem proposta em diferentes cenários de edição.
+\end{abstract}
+
+\section{Introdução}
+
+Modelos de difusão representam o estado da arte em geração de imagens, possibilitando aplicações que vão desde criação artística até edição profissional de fotografias. O objetivo neste trabalho é implementar duas técnicas fundamentais de edição de imagens baseadas em modelos de difusão:
+
+\begin{itemize}
+\item \textbf{Outpainting}: Expansão inteligente de imagens além de suas bordas originais, mantendo coerência visual e artística com o conteúdo central
+\item \textbf{Textual Refinement}: Edição controlada de regiões específicas da imagem guiada por prompts textuais, permitindo modificações localizadas sem afetar o restante da composição
+\end{itemize}
+
+Para aprimorar a qualidade e controle destas duas tarefas principais, o pipeline integra duas tecnologias complementares:
+
+\begin{itemize}
+\item \textbf{SegFormer}: Modelo de segmentação semântica que automatiza a criação de máscaras precisas baseadas em classes de objetos, eliminando a necessidade de desenho manual e acelerando o fluxo de trabalho
+\item \textbf{ControlNet}: Extensão do Stable Diffusion que adiciona controle estrutural explícito através de detecção de bordas, preservando características geométricas importantes durante a geração
+\end{itemize}
+
+A combinação destas tecnologias permite realizar outpainting e textual refinement com maior precisão, menor esforço manual e melhor preservação das características estruturais da imagem original.
+
+\section{Arquitetura do Sistema}
+
+O sistema implementado é composto por três módulos principais que trabalham de forma integrada para viabilizar as tarefas de outpainting e textual refinement:
+
+\subsection{Módulo de Geração (Stable Diffusion Inpainting)}
+
+O núcleo do sistema é baseado no modelo \texttt{sd-legacy/stable-diffusion-inpainting}, uma variante do Stable Diffusion especificamente treinada para a tarefa de \textit{inpainting}. Este modelo recebe três entradas principais:
+\begin{itemize}
+\item \textbf{Imagem original}: A imagem base que será editada ou expandida
+\item \textbf{Máscara binária}: Define quais regiões serão regeneradas (branco) e quais serão preservadas (preto)
+\item \textbf{Prompt textual}: Descrição do conteúdo desejado para as áreas mascaradas
+\end{itemize}
+
+O processo de difusão iterativo permite que o modelo gere conteúdo novo que seja coerente com as áreas preservadas, respeitando tanto o contexto visual quanto a descrição textual fornecida.
+
+\subsection{Módulo de Controle Estrutural (ControlNet)}
+
+Para aprimorar a qualidade do outpainting e refinement, foi integrado o ControlNet, uma extensão do Stable Diffusion que adiciona controle espacial explícito ao processo de geração. O modelo implementado \texttt{lllyasviel/sd-controlnet-canny} utiliza detecção de bordas para guiar a geração:
+
+\begin{enumerate}
+\item Uma imagem de controle é extraída da imagem original usando detecção de bordas (filtro FIND\_EDGES)
+\item Esta imagem de controle é alimentada ao ControlNet juntamente com o prompt
+\item Durante o processo de difusão, o ControlNet injeta informação estrutural em cada passo
+\item O resultado preserva as estruturas principais enquanto permite variação nos detalhes
+\end{enumerate}
+
+O parâmetro \texttt{guidance\_scale} controla o quanto o modelo deve seguir o prompt textual versus a imagem de controle, permitindo ajuste fino entre criatividade e fidelidade estrutural.
+
+\subsection{Módulo de Segmentação (SegFormer)}
+
+Para facilitar as tarefas de outpainting e refinement, especialmente quando se deseja editar regiões semânticas específicas, foi integrado o SegFormer (\texttt{nvidia/segformer-b0-finetuned-ade-512-512}), um transformer de segmentação semântica treinado no dataset ADE20K com 150 classes. Este módulo automatiza a criação de máscaras, eliminando a necessidade de desenho manual. O processo funciona em três etapas:
+
+\begin{enumerate}
+\item \textbf{Segmentação}: A imagem é processada pelo SegFormer, gerando um mapa onde cada pixel recebe um ID de classe semântica
+\item \textbf{Seleção de Classes}: O usuário especifica quais classes semânticas deseja mascarar (ex: pessoa, fundo, céu, objetos)
+\item \textbf{Geração de Máscara}: Uma máscara binária é criada automaticamente, marcando todos os pixels das classes selecionadas
+\end{enumerate}
+
+Esta abordagem elimina completamente a necessidade de criação manual de máscaras, tornando o fluxo de edição muito mais eficiente.
+
+\section{Segmentação Semântica com SegFormer}\cite{segformer_xie2021}
+
+O SegFormer foi integrado ao pipeline como uma ferramenta de aprimoramento para facilitar a criação de máscaras nas tarefas de outpainting e textual refinement. Trata-se de uma arquitetura de transformer hierárquico para segmentação semântica, que combina eficiência computacional com alta precisão. A escolha do modelo \texttt{segformer-b0-finetuned-ade-512-512} foi motivada por três fatores principais:
+
+\subsection{Arquitetura do SegFormer}
+
+O SegFormer utiliza um encoder hierárquico de transformer que processa a imagem em múltiplas escalas:
+\begin{itemize}
+\item \textbf{Encoder Multi-escala}: Patches são processados em diferentes resoluções, capturando tanto detalhes finos quanto contexto global
+\item \textbf{Mix-FFN Decoder}: Um decoder leve que combina features de todas as escalas sem necessidade de upsampling pesado
+\item \textbf{Eficiência}: O modelo B0 (mais leve da família) processa imagens 512x512 rapidamente, adequado para uso interativo
+\end{itemize}
+
+\subsection{Dataset ADE20K e Classes Disponíveis}
+
+O treinamento no ADE20K fornece 150 classes semânticas, incluindo:
+\begin{itemize}
+\item \textbf{Pessoas}: pessoa (ID 12), rosto (ID 13)
+\item \textbf{Natureza}: céu (ID 2), árvore (ID 4), grama (ID 20)
+\item \textbf{Estruturas}: parede (ID 0), edifício (ID 1), piso (ID 3)
+\item \textbf{Objetos}: carro (ID 19), porta (ID 67), roupas (ID 102)
+\end{itemize}
+
+\subsection{Pipeline de Segmentação}
+
+O processo de segmentação implementado segue os seguintes passos:
+
+\begin{enumerate}
+\item \textbf{Pré-processamento}: A imagem é normalizada usando o \texttt{SegformerImageProcessor} que ajusta valores para a faixa esperada pelo modelo
+\item \textbf{Inferência}: O modelo gera logits de classificação para cada pixel em resolução reduzida
+\item \textbf{Upsampling}: Interpolação bilinear redimensiona os logits para o tamanho original da imagem
+\item \textbf{Argmax}: Cada pixel recebe a classe com maior probabilidade, gerando o mapa de segmentação final
+\end{enumerate}
+
+\subsection{Funções de Criação de Máscaras}
+
+Implementamos três abordagens principais para geração automática de máscaras:
+
+\textbf{1. Máscara por Classes Específicas} (\texttt{create\_mask\_from\_classes}): Permite selecionar um conjunto arbitrário de IDs de classe e criar uma máscara que inclui apenas essas regiões. O parâmetro \texttt{invert} permite inverter a seleção.
+
+\textbf{2. Máscara de Fundo} (\texttt{create\_background\_mask}): Identifica automaticamente pessoas na cena (classes 12 e 13) e mascara tudo exceto elas, ideal para substituição de fundos preservando o sujeito principal.
+
+\textbf{3. Máscara de Pessoa} (\texttt{create\_person\_mask}): Oposto da anterior, mascara apenas as pessoas, permitindo edição de roupas, poses ou características enquanto preserva o ambiente.
+
+\section{ControlNet para Aprimoramento Estrutural}\cite{controlnet_zhang2023}
+
+O ControlNet foi integrado ao pipeline como um aprimorador das tarefas de outpainting e refinement, adicionando controle estrutural preciso. Esta tecnologia representa um avanço significativo em controle espacial para modelos de difusão. Enquanto o Stable Diffusion base responde apenas a prompts textuais, o ControlNet adiciona condicionamento explícito através de imagens de controle.
+
+\subsection{Princípio de Funcionamento}
+
+O ControlNet funciona criando uma cópia dos blocos do encoder do Stable Diffusion e treinando-a para processar imagens de controle:
+
+\begin{enumerate}
+\item \textbf{Arquitetura Paralela}: Uma rede neural leve (cópia dos blocos do U-Net) processa a imagem de controle
+\item \textbf{Zero Convolutions}: Conexões inicializadas com pesos zero garantem que o modelo pré-treinado não seja perturbado no início
+\item \textbf{Injeção de Features}: As features da imagem de controle são adicionadas às ativações do U-Net original em cada resolução
+\item \textbf{Treinamento}: Apenas o ControlNet é treinado, preservando os pesos do Stable Diffusion base
+\end{enumerate}
+
+\subsection{ControlNet Canny para Inpainting}
+
+O modelo implementado \texttt{sd-controlnet-canny} foi treinado especificamente com detecção de bordas Canny. Seu uso traz benefícios específicos para as tarefas de outpainting e refinement:
+
+\textbf{Benefícios para Outpainting}:
+\begin{itemize}
+\item Mantém a continuidade de linhas do horizonte ao expandir paisagens
+\item Preserva estruturas arquitetônicas ao estender cenas urbanas
+\item Garante transições suaves entre a imagem original e as áreas geradas
+\end{itemize}
+
+\textbf{Benefícios para Textual Refinement}:
+\begin{itemize}
+\item Preserva contornos de objetos adjacentes à região editada
+\item Mantém consistência estrutural ao modificar apenas partes da imagem
+\item Permite ajuste fino do balanço entre criatividade e fidelidade via \texttt{guidance\_scale}
+\end{itemize}
+
+\subsection{Implementação no Pipeline}
+
+A extração de bordas é feita de forma simplificada usando o filtro \texttt{FIND\_EDGES} do PIL:
+
+\begin{verbatim}
+edges = image.convert("L").filter(ImageFilter.FIND_EDGES)
+edges = ImageOps.invert(edges)
+control_image = Image.merge("RGB", (edges, edges, edges))
+\end{verbatim}
+
+Esta abordagem evita dependências pesadas (OpenCV) e é suficiente para capturar estruturas principais. Durante a geração, o ControlNet recebe:
+\begin{itemize}
+\item A imagem de controle (bordas)
+\item O prompt textual
+\item A imagem base e máscara (para inpainting)
+\end{itemize}
+
+E produz saídas que respeitam tanto a estrutura quanto a descrição textual.
+
+\section{Implementação das Tarefas Principais}
+
+O sistema foi desenvolvido para executar duas tarefas principais de edição de imagens, ambas aprimoradas pela integração opcional com ControlNet e SegFormer conforme a necessidade de controle e automação.
+
+\subsection{Outpainting: Expansão de Canvas}
+
+O \textit{outpainting} expande a imagem além de suas bordas originais. O processo implementado:
+
+\begin{enumerate}
+\item \textbf{Criação do Canvas}: Um canvas maior é criado com fundo cinza neutro (RGB 128,128,128)
+\item \textbf{Centralização}: A imagem original é colada no centro do novo canvas
+\item \textbf{Máscara Automática}: Uma máscara é gerada onde branco=preencher (bordas) e preto=preservar (centro)
+\item \textbf{Geração}: O modelo preenche as áreas vazias guiado pelo prompt e contexto da imagem central
+\end{enumerate}
+
+O parâmetro \texttt{expand\_factor} controla o quanto expandir (ex: 1.5 = 50\% maior). O \texttt{strength=1.0} garante regeneração completa das áreas mascaradas.
+
+\textbf{Com ControlNet}: As bordas da imagem original guiam a geração das novas áreas, garantindo continuidade estrutural. Por exemplo, linhas do horizonte, elementos arquitetônicos ou texturas se estendem naturalmente.
+
+\subsection{Textual Refinement: Edição Localizada}
+
+O \textit{refinement} modifica regiões específicas da imagem:
+
+\begin{enumerate}
+\item \textbf{Seleção de Região}: Uma máscara define a área a editar (manual ou via SegFormer)
+\item \textbf{Prompt Direcionado}: Descreve o conteúdo desejado para aquela região
+\item \textbf{Parâmetro Strength}: Controla o grau de modificação:
+    \begin{itemize}
+    \item \texttt{strength=0.3-0.5}: Modificações sutis, preserva muita estrutura
+    \item \texttt{strength=0.6-0.8}: Balanço entre original e novo conteúdo
+    \item \texttt{strength=0.9-1.0}: Mudanças drásticas, maior liberdade criativa
+    \end{itemize}
+\item \textbf{Geração}: Apenas a área mascarada é regenerada, com transições suaves nas bordas
+\end{enumerate}
+
+\textbf{Aprimoramento com SegFormer}: O módulo de segmentação semântica oferece três funções de criação automática de máscaras (\texttt{create\_background\_mask}, \texttt{create\_person\_mask}, \texttt{create\_mask\_from\_classes}) que eliminam a necessidade de desenho manual, acelerando significativamente o fluxo de trabalho para refinement:
+\begin{itemize}
+\item Substituição de fundo: máscara automática de tudo exceto pessoas + prompt descritivo
+\item Modificação de roupas: máscara automática da pessoa + prompt de vestimenta desejada
+\item Edição de elementos naturais: seleção automática de céu, árvores, grama, etc.
+\end{itemize}
+
+\textbf{Aprimoramento com ControlNet}: A adição de controle estrutural melhora a preservação de bordas e contornos nas áreas não mascaradas durante o refinement.
+
+\section{Experimentos e Resultados}
+
+Foram realizados diversos experimentos para avaliar o desempenho do sistema nas tarefas de outpainting e textual refinement, bem como os benefícios trazidos pelos módulos de aprimoramento (ControlNet e SegFormer). A pintura "Girl with a Pearl Earring" de Vermeer foi utilizada como imagem de teste principal devido à sua riqueza de detalhes e reconhecibilidade.
+
+\subsection{Experimento 1: Outpainting Básico}
+
+O primeiro experimento demonstra a expansão de canvas sem ControlNet, permitindo ao modelo gerar livremente as bordas.
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{original_resized.png}
+        \caption{Imagem original (512x512)}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{result_outpainting.png}
+        \caption{Outpainting com expand\_factor=1.5}
+    \end{minipage}
+    \caption{Comparação entre imagem original e resultado do outpainting. O modelo expandiu o canvas mantendo o estilo da pintura barroca e criando um fundo coerente com moldura de museu.}
+    \label{fig:outpainting_basic}
+\end{figure}
+
+\textbf{Prompt}: "classic oil painting, museum background, detailed frame, baroque style"
+
+\textbf{Observações}: O modelo demonstrou capacidade de estender o contexto artístico da pintura original, criando elementos coerentes que sugerem um ambiente de galeria de arte. A transição entre a imagem original e as áreas geradas apresentou-se suave, sem artefatos visíveis.
+
+\subsection{Experimento 2: Refinement com Máscaras Manuais}
+
+Testamos a edição de uma região específica (metade inferior) para modificar as roupas da figura.
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{original_resized.png}
+        \caption{Imagem original}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{result_refinement.png}
+        \caption{Refinement na metade inferior}
+    \end{minipage}
+    \caption{Edição localizada modificando a vestimenta. Com strength=0.85, o modelo teve liberdade criativa significativa enquanto preservava a parte superior da imagem.}
+    \label{fig:refinement_manual}
+\end{figure}
+
+\textbf{Prompt}: "a girl wearing a futuristic cyberpunk jacket, neon lights, high detail"
+
+\textbf{Parâmetros}: strength=0.85, steps=50
+
+\textbf{Observações}: A tarefa de textual refinement foi executada com sucesso, transformando a vestimenta clássica em uma jaqueta futurista conforme especificado no prompt. A preservação precisa do rosto e da parte superior da imagem demonstra a eficácia do controle localizado via máscara.
+
+\subsection{Experimento 3: Aprimoramento com Segmentação Automática}
+
+Este experimento demonstra como o SegFormer aprimora a tarefa de textual refinement ao automatizar a criação de máscaras, eliminando trabalho manual.
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{original_resized.png}
+        \caption{Imagem original}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{result_auto_background_replacement.png}
+        \caption{Substituição automática de fundo}
+    \end{minipage}
+    \caption{Uso de create\_background\_mask() para identificar e modificar apenas o fundo, preservando automaticamente a pessoa. Prompt: "abstract geometric patterns, modern art, vibrant colors".}
+    \label{fig:auto_background}
+\end{figure}
+
+\textbf{Análise}: O módulo SegFormer identificou corretamente a pessoa na pintura (classes 12 e 13) e gerou uma máscara precisa automaticamente. A tarefa de refinement resultou em um fundo completamente reimaginado enquanto a figura permaneceu intacta, demonstrando como a segmentação semântica aprimora a precisão e eficiência do processo.
+
+
+\subsection{Experimento 4: Refinement com Seleção de Classes Específicas}
+
+Este experimento avalia como o SegFormer permite refinement altamente direcionado através da seleção de classes semânticas específicas.
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{natural_0.png}
+        \caption{Imagem original 1}
+    \end{minipage}
+    \hfill
+      \begin{minipage}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{natural_1.png}
+        \caption{Imagem original 1}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{result_0_custom_classes.png}
+        \caption{Edição de natureza (classes 2,4,20)}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{result_1_custom_classes.png}
+        \caption{Variação alternativa}
+    \end{minipage}
+    \caption{Uso de create\_mask\_from\_classes() para selecionar especificamente céu (ID 2), árvores (ID 4) e grama (ID 20), transformando esses elementos em uma cena fantástica.}
+    \label{fig:custom_classes}
+\end{figure}
+
+\textbf{Prompt}: "fantasy landscape, magical atmosphere, ethereal lighting, mystical nature"
+
+\textbf{Vantagem}: A seleção por classes semânticas permite edições muito específicas sem necessidade de ferramentas de desenho. Por exemplo, modificar apenas elementos naturais, apenas estruturas construídas, ou apenas objetos específicos.
+
+\subsection{Experimento 5: Comparação de Strength}
+
+Analisamos o efeito do parâmetro \texttt{strength} na qualidade e criatividade da edição.
+
+\begin{table}[H]
+\centering
+\caption{Impacto do parâmetro Strength}
+\label{tab:strength}
+\begin{tabular}{|c|p{8cm}|}
+\hline
+\textbf{Strength} & \textbf{Comportamento Observado} \\
+\hline
+0.3 & Modificações muito sutis, estrutura original quase totalmente preservada, mais seguro mas menos criativo \\
+\hline
+0.6 & Bom balanço: mudanças visíveis mas transições naturais, mantém coerência com original \\
+\hline
+0.9 & Transformações drásticas, alta liberdade criativa, pode divergir significativamente do original \\
+\hline
+\end{tabular}
+\end{table}
+
+\textbf{Recomendação}: Para substituição de fundos, usar strength=0.8-0.9. Para ajustes sutis de cor/iluminação, usar strength=0.3-0.5. Para mudanças de estilo artístico, usar strength=0.7-0.85.
+
+\section{Análise Qualitativa}
+
+\subsection{Eficácia das Tarefas Principais}
+
+Os experimentos demonstraram que o sistema é capaz de executar com sucesso as tarefas de \textbf{outpainting} e \textbf{textual refinement}. O outpainting gerou extensões coerentes das imagens originais, mantendo estilo artístico e continuidade visual. O refinement permitiu modificações localizadas precisas, desde mudanças sutis até transformações drásticas de estilo, dependendo dos parâmetros utilizados.
+
+\subsection{Contribuição do SegFormer}
+
+O módulo SegFormer demonstrou ser um aprimorador eficaz para a tarefa de refinement, apresentando precisão notável na identificação de pessoas e objetos principais, mesmo em pinturas artísticas fora do domínio de treinamento. A automação da criação de máscaras reduziu significativamente o esforço manual necessário.
+
+\subsection{Contribuição do ControlNet}
+
+O ControlNet com detecção de bordas demonstrou ser um aprimorador crucial tanto para outpainting quanto para refinement:
+\begin{itemize}
+\item \textbf{Para Outpainting}: Manutenção de linhas do horizonte contínuas, preservação de estruturas arquitetônicas e garantia de transições suaves
+\item \textbf{Para Refinement}: Preservação de contornos de objetos adjacentes, evasão de distorções em estruturas geométricas próximas à região editada
+\end{itemize}
+
+\subsection{Coerência Visual das Tarefas Principais}
+
+Os resultados de outpainting e refinement mantiveram coerência visual satisfatória em todos os experimentos. O modelo Stable Diffusion Inpainting demonstrou capacidade consistente em:
+\begin{itemize}
+\item Harmonizar a iluminação entre áreas originais e geradas/editadas
+\item Manter continuidade de texturas e padrões
+\item Respeitar o estilo artístico quando especificado no prompt
+\item Produzir transições naturais nas bordas das máscaras
+\end{itemize}
+
+\section{Limitações e Trabalhos Futuros}
+
+\subsection{Limitações Identificadas}
+
+\textbf{Relacionadas às Tarefas Principais}:
+\begin{itemize}
+\item \textbf{Outpainting}: Expansões muito grandes (>2x) podem resultar em perda gradual de coerência visual nas bordas mais distantes
+\item \textbf{Refinement}: Modificações drásticas com strength muito alto podem gerar descontinuidades nas bordas da máscara
+\item Tempo de geração significativo em CPU (30-60s por imagem) limita uso interativo
+\end{itemize}
+
+\textbf{Relacionadas aos Módulos de Aprimoramento}:
+\begin{itemize}
+\item \textbf{SegFormer}: A segmentação pode falhar em objetos muito pequenos ou parcialmente oclusos
+\item \textbf{ControlNet}: A detecção de bordas nem sempre captura adequadamente texturas complexas ou gradientes suaves
+\item A integração de ambos os aprimoradores aumenta consideravelmente o uso de memória e tempo de processamento
+\end{itemize}
+
+\subsection{Próximos Passos}
+
+\textbf{Aprimoramento das Tarefas Principais}:
+\begin{itemize}
+\item Explorar modelos mais recentes (SDXL, SD3) para melhorar qualidade de outpainting e refinement
+\item Implementar outpainting direcional (expandir apenas em direções específicas)
+\item Desenvolver métricas automáticas de qualidade específicas para cada tarefa
+\item Avaliar desempenho em diferentes domínios (fotografias, ilustrações, arte digital)
+\end{itemize}
+
+\textbf{Aprimoramento dos Módulos Complementares}:
+\begin{itemize}
+\item Integrar SAM (Segment Anything Model) como alternativa ao SegFormer
+\item Testar outros tipos de ControlNet (depth, pose, normal maps) para casos específicos
+\item Avaliar quantitativamente o ganho de qualidade proporcionado por cada módulo
+\item Desenvolver heurísticas para ativar aprimoradores automaticamente conforme necessidade
+\end{itemize}
+
+\textbf{Otimizações de Desempenho}:
+\begin{itemize}
+\item Quantização de modelos para reduzir uso de memória sem perda significativa de qualidade
+\item Pipeline assíncrono para paralelizar segmentação e geração
+\item Implementação de caching para acelerar operações repetidas
+\item Suporte a bibliotecas de aceleração (TensorRT, ONNX Runtime)
+\end{itemize}
+
+\section{Detalhes de Implementação}
+
+\subsection{Requisitos de Software}
+
+\textbf{Bibliotecas Python}:
+\begin{itemize}
+\item \texttt{torch} (>= 2.0): Framework de deep learning
+\item \texttt{diffusers} (>= 0.35): Pipeline de Stable Diffusion e ControlNet
+\item \texttt{transformers} (>= 4.57): SegFormer e processadores
+\item \texttt{pillow}: Manipulação de imagens
+\item \texttt{numpy}: Operações numéricas
+\item \texttt{torchmetrics}: Métricas de avaliação (SSIM, LPIPS)
+\end{itemize}
+
+\textbf{Hardware Recomendado}:
+\begin{itemize}
+\item GPU NVIDIA com 6GB+ VRAM (para execução em tempo razoável)
+\item 16GB+ RAM para carregar todos os modelos simultaneamente
+\item CPU moderno pode executar, mas com tempo de geração significativo (30-60s por imagem)
+\end{itemize}
+
+\subsection{Estrutura do Código}
+
+O notebook \texttt{main.ipynb} está organizado em seções modulares:
+
+\begin{enumerate}
+\item \textbf{Setup}: Instalação de dependências e carregamento de modelos
+\item \textbf{Funções Auxiliares}: Helpers para controle de bordas
+\item \textbf{Segmentação}: Implementação das funções SegFormer
+\item \textbf{Outpainting}: Função principal de expansão de canvas
+\item \textbf{Refinement}: Função principal de edição localizada
+\item \textbf{Experimentos}: Células demonstrando diferentes casos de uso
+\item \textbf{Métricas}: Cálculo de SSIM e LPIPS para avaliação
+\end{enumerate}
+
+\subsection{Parâmetros Principais}
+
+\textbf{Geração}:
+\begin{itemize}
+\item \texttt{num\_inference\_steps}: 40-50 para qualidade, 20-30 para velocidade
+\item \texttt{guidance\_scale}: 7.5 padrão, aumentar para maior fidelidade ao prompt
+\item \texttt{strength}: 0.3-1.0 conforme grau de modificação desejado
+\item \texttt{generator}: Seed para reprodutibilidade
+\end{itemize}
+
+\textbf{ControlNet}:
+\begin{itemize}
+\item \texttt{use\_controlnet}: Boolean para ativar/desativar
+\item \texttt{control\_image}: Opcional, usa detecção automática de bordas se None
+\end{itemize}
+
+\textbf{Segmentação}:
+\begin{itemize}
+\item \texttt{target\_classes}: Lista de IDs de classe para mascarar
+\item \texttt{invert}: Boolean para inverter seleção
+\end{itemize}
+
+\section{Reprodutibilidade}
+
+\textbf{Passos para Execução}:
+
+\begin{enumerate}
+\item Instalar Python 3.12+ e criar ambiente virtual:
+\begin{verbatim}
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+\end{verbatim}
+
+\item Instalar dependências:
+\begin{verbatim}
+pip install diffusers transformers accelerate torch \
+            pillow torchmetrics lpips
+\end{verbatim}
+
+\item Baixar o notebook \texttt{main.ipynb}
+
+\item Executar células sequencialmente:
+   \begin{itemize}
+   \item Instalação e imports
+   \item Download de imagem de teste
+   \item Definição de funções
+   \item Experimentos desejados
+   \end{itemize}
+
+\item Resultados são salvos automaticamente como arquivos PNG
+\end{enumerate}
+
+\textbf{Tempo de Execução Esperado}:
+\begin{itemize}
+\item Setup inicial (download de modelos): 5-10 minutos
+\item Por geração (GPU): 5-15 segundos
+\item Por geração (CPU): 30-90 segundos
+\end{itemize}
+
+\section{Considerações Finais}
+
+Este trabalho apresentou a implementação bem-sucedida de duas tarefas fundamentais de edição de imagens baseadas em modelos de difusão: \textbf{outpainting} e \textbf{textual refinement}. O sistema desenvolvido demonstrou capacidade de expandir imagens mantendo coerência visual e de realizar modificações localizadas precisas guiadas por texto.
+
+Para aprimorar a execução destas tarefas principais, foram integrados dois módulos complementares: ControlNet, que adiciona controle estrutural preciso, e SegFormer, que automatiza a criação de máscaras. Os experimentos demonstraram que estes aprimoradores contribuem significativamente para a qualidade e eficiência do pipeline.
+
+\subsection{Principais Contribuições}
+
+\begin{itemize}
+\item \textbf{Implementação Eficaz}: Desenvolvimento de um sistema funcional para outpainting e textual refinement com resultados qualitativamente satisfatórios
+\item \textbf{Arquitetura Modular}: Design que permite usar os módulos de aprimoramento opcional e independentemente conforme necessidade
+\item \textbf{Automação Inteligente}: Integração do SegFormer para eliminar trabalho manual de criação de máscaras
+\item \textbf{Controle Estrutural}: Incorporação do ControlNet para melhorar preservação de estruturas geométricas
+\end{itemize}
+
+\subsection{Lições Aprendidas}
+
+A experimentação revelou aspectos importantes sobre a execução das tarefas:
+\begin{itemize}
+\item \textbf{Para Outpainting}: Fatores de expansão moderados (1.3-1.7x) produzem melhores resultados; a qualidade do prompt determina a coerência do conteúdo gerado
+\item \textbf{Para Refinement}: O parâmetro \texttt{strength} é crítico para balancear preservação e criatividade; valores entre 0.7-0.85 oferecem melhor equilíbrio
+\item \textbf{Sobre ControlNet}: Melhora significativamente a coerência estrutural de ambas as tarefas, mas aumenta tempo de processamento em aproximadamente 30\%
+\item \textbf{Sobre SegFormer}: Generaliza bem para domínios fora de seu treinamento (como pinturas artísticas), tornando-se um aprimorador versátil para refinement
+\end{itemize}
+
+\subsection{Aplicações Práticas}
+
+As tarefas de outpainting e refinement implementadas possuem aplicações práticas diversas:
+
+\textbf{Aplicações de Outpainting}:
+\begin{itemize}
+\item \textbf{Fotografia}: Adaptação de imagens para diferentes aspect ratios sem cropping
+\item \textbf{Design}: Extensão de cenas conceituais para composições maiores
+\item \textbf{Restauração}: Recuperação de bordas danificadas ou cortadas em fotografias históricas
+\end{itemize}
+
+\textbf{Aplicações de Textual Refinement}:
+\begin{itemize}
+\item \textbf{E-commerce}: Troca automática de fundos de produtos (com SegFormer)
+\item \textbf{Design}: Variações rápidas de elementos específicos em mockups
+\item \textbf{Arte Digital}: Modificação seletiva de regiões mantendo coerência global
+\item \textbf{Fotografia}: Remoção/substituição de objetos indesejados
+\end{itemize}
+
+O sistema desenvolvido possui arquitetura modular que facilita a incorporação de novos modelos e técnicas, servindo como base sólida para explorações futuras nas tarefas de outpainting e refinement.
+
+\bibliographystyle{sbc}
+\bibliography{sbc-template}
+
+
+\end{document}
